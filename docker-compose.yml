@@ -1,0 +1,55 @@
+version: '3.8'
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./infra/mosquitto/config:/mosquitto/config
+      - mosquitto_data:/mosquitto/data
+
+  device-simulator:
+    build: ./device-simulator
+    ports:
+      - "8002:8002"
+    environment:
+      - MQTT_HOST=mosquitto
+      - MQTT_PORT=1883
+    depends_on:
+      - mosquitto
+
+  ml-service:
+    build: ./ml-service
+    ports:
+      - "8001:8001"
+    volumes:
+      - ml_data:/app/data
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - MQTT_HOST=mosquitto
+      - MQTT_PORT=1883
+      - ML_SERVICE_URL=http://ml-service:8001
+      - DATABASE_URL=sqlite:////app/data/homeiq.db
+      - JWT_SECRET=homeiq-secret-2026
+      - ML_CONFIDENCE_THRESHOLD=0.7
+    depends_on:
+      - mosquitto
+      - ml-service
+    volumes:
+      - backend_data:/app/data
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  mosquitto_data:
+  ml_data:
+  backend_data:

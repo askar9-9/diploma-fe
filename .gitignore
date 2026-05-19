@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+.venv39/
+.venv-py311-check/
+venv/
+env/
+ENV/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+.cache
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ML models and data (large files)
+ml-service/data/models/*.joblib
+ml-service/data/casas/*
+!ml-service/data/casas/.gitkeep
+!ml-service/data/models/.gitkeep
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+backend/data/
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+*.local
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Mosquitto
+infra/mosquitto/data/
+
+# Env files (secrets)
+.env
+.env.*
+!.env.example
