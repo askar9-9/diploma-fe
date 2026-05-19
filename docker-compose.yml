@@ -1,4 +1,3 @@
-version: '3.8'
 services:
   mosquitto:
     image: eclipse-mosquitto:2
@@ -33,6 +32,7 @@ services:
       - MQTT_HOST=mosquitto
       - MQTT_PORT=1883
       - ML_SERVICE_URL=http://ml-service:8001
+      - DEVICE_SIMULATOR_URL=http://device-simulator:8002
       - DATABASE_URL=sqlite:////app/data/homeiq.db
       - JWT_SECRET=homeiq-secret-2026
       - ML_CONFIDENCE_THRESHOLD=0.7

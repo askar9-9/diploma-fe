@@ -66,3 +66,45 @@ class ModelInfoResponse(BaseModel):
     trained_at: str | None
     n_classes: int
     accuracy: float
+
+
+class EnergyHourForecast(BaseModel):
+    hour: int
+    offset_hours: int
+    scenario: str
+    confidence: float
+    consumption_wh: float
+    consumption_kwh: float
+    devices: dict[str, float]
+
+
+class EnergyForecastResponse(BaseModel):
+    current_hour: int
+    weekday: int
+    forecast: list[EnergyHourForecast]
+    total_kwh: float
+    peak_hour: int
+    peak_consumption_wh: float
+    recommendations: list[str]
+
+
+class EnergyForecastRequest(BaseModel):
+    current_hour: int = Field(ge=0, le=23)
+    weekday: int = Field(ge=0, le=6)
+
+
+class AnomalyRequest(BaseModel):
+    hour_of_day: int
+    weekday: int
+    motion_hall: int
+    motion_living: int
+    temperature: float
+    light_level: float
+    tv_on: int
+    minutes_idle: int
+
+
+class AnomalyResult(BaseModel):
+    anomaly: bool
+    score: float
+    reason: str

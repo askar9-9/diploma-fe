@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from backend.app.feature_builder import build_feature_vector
+from app.feature_builder import build_feature_vector
 
 
 def test_all_8_features_present():

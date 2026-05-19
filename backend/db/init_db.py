@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
-from backend.db.models import Base, Device, Scenario
+from db.models import Base, Device, Scenario
 
 _PRESET_SCENARIOS = [
     {

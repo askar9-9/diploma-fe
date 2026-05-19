@@ -3,17 +3,21 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.app.config import ML_SERVICE_URL
-from backend.app.db import engine
-from backend.app.ml_client import MLClient
-from backend.app.mqtt_handler import MQTTHandler
-from backend.app.routers.auth import router as auth_router
-from backend.app.routers.devices import router as devices_router
-from backend.app.routers.scenarios import router as scenarios_router
-from backend.app.routers.simulation import router as simulation_router
-from backend.app.routers.websocket import router as websocket_router
-from backend.app.websocket_manager import WebSocketManager
-from backend.db.init_db import init_db
+from app.config import ML_SERVICE_URL
+from app.db import engine
+from app.ml_client import MLClient
+from app.mqtt_handler import MQTTHandler
+from app.routers.anomaly import router as anomaly_router
+from app.routers.auth import router as auth_router
+from app.routers.devices import router as devices_router
+from app.routers.energy import router as energy_router
+from app.routers.events import router as events_router
+from app.routers.ml_history import router as ml_history_router
+from app.routers.scenarios import router as scenarios_router
+from app.routers.simulation import router as simulation_router
+from app.routers.websocket import router as websocket_router
+from app.websocket_manager import WebSocketManager
+from db.init_db import init_db
 
 
 @asynccontextmanager
@@ -45,6 +49,10 @@ def health() -> dict[str, str]:
 
 app.include_router(auth_router)
 app.include_router(devices_router)
+app.include_router(energy_router)
+app.include_router(events_router)
+app.include_router(ml_history_router)
+app.include_router(anomaly_router)
 app.include_router(scenarios_router)
 app.include_router(simulation_router)
 app.include_router(websocket_router)

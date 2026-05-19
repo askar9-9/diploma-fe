@@ -1,6 +1,9 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
+import httpx
 
-from backend.app.auth import get_current_user
+from app.auth import get_current_user
+from app.config import DEVICE_SIMULATOR_URL
 
 
 router = APIRouter(
@@ -10,19 +13,39 @@ router = APIRouter(
 )
 
 
+class SimulationStartRequest(BaseModel):
+    speed: int = Field(default=60, ge=1)
+
+
 @router.post("/start")
-def start_simulation(request: Request) -> dict[str, object]:
-    request.app.state.mqtt_handler.publish_simulation_control("start", speed=30)
-    return {"status": "queued", "action": "start", "speed": 30}
+async def start_simulation(payload: SimulationStartRequest) -> dict:
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{DEVICE_SIMULATOR_URL}/simulation/start",
+            json={"speed": payload.speed},
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
 @router.post("/stop")
-def stop_simulation(request: Request) -> dict[str, str]:
-    request.app.state.mqtt_handler.publish_simulation_control("stop")
-    return {"status": "queued", "action": "stop"}
+async def stop_simulation() -> dict:
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{DEVICE_SIMULATOR_URL}/simulation/stop",
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
-@router.post("/reset")
-def reset_simulation(request: Request) -> dict[str, str]:
-    request.app.state.mqtt_handler.publish_simulation_control("reset")
-    return {"status": "queued", "action": "reset"}
+@router.get("/status")
+async def get_simulation_status() -> dict:
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{DEVICE_SIMULATOR_URL}/simulation/status",
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+        return resp.json()

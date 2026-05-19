@@ -21,6 +21,7 @@ class MQTTClient:
         self,
         on_device_command: Callable[[str, float], None] | None = None,
         on_scene_activate: Callable[[str], None] | None = None,
+        on_connected: Callable[[], None] | None = None,
         host: str | None = None,
         port: int | None = None,
     ) -> None:
@@ -28,13 +29,15 @@ class MQTTClient:
         self.port = int(port or os.getenv("MQTT_PORT", "1883"))
         self.on_device_command = on_device_command
         self.on_scene_activate = on_scene_activate
+        self.on_connected = on_connected
         self.client = mqtt.Client()
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
 
     def connect(self) -> bool:
         try:
-            self.client.connect(self.host, self.port)
+            self.client.reconnect_delay_set(min_delay=1, max_delay=10)
+            self.client.connect_async(self.host, self.port, keepalive=60)
             self.client.loop_start()
             return True
         except Exception as exc:  # pragma: no cover - depends on runtime broker
@@ -78,6 +81,8 @@ class MQTTClient:
         try:
             self.client.subscribe("homeiq/devices/+/command")
             self.client.subscribe("homeiq/scenes/activate")
+            if self.on_connected is not None:
+                self.on_connected()
         except Exception as exc:  # pragma: no cover - depends on runtime broker
             LOGGER.error("Unable to subscribe to MQTT topics: %s", exc)
 

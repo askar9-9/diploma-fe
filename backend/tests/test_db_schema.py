@@ -11,8 +11,8 @@ from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
 # These imports will fail until models.py and init_db.py are created (RED phase)
-from backend.db.models import Base, Device, Event, FeatureVector, Scenario, SuggestedPattern
-from backend.db.init_db import init_db
+from db.models import Base, Device, Event, FeatureVector, Scenario, SuggestedPattern
+from db.init_db import init_db
 
 
 @pytest.fixture

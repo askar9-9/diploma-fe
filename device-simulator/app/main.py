@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from app.devices import DeviceRegistry
 from app.mqtt_client import MQTTClient
 from app.scenes import apply_scene
+from app.simulation import DaySimulator
 
 
 app = FastAPI(title="HomeIQ Device Simulator")
@@ -54,10 +55,18 @@ def _handle_scene_activate(scene_id: str) -> None:
     _activate_scene(scene_id, publish=True)
 
 
+def _publish_initial_states() -> None:
+    for device_id, device in registry.get_all().items():
+        mqtt_client.publish_state(device_id, float(device["state"]))
+
+
 mqtt_client = MQTTClient(
     on_device_command=_handle_device_command,
     on_scene_activate=_handle_scene_activate,
+    on_connected=_publish_initial_states,
 )
+
+simulator = DaySimulator(registry=registry, mqtt_client=mqtt_client)
 
 
 class DeviceStateUpdate(BaseModel):
@@ -67,6 +76,10 @@ class DeviceStateUpdate(BaseModel):
 class TimeUpdate(BaseModel):
     hour: int = Field(ge=0, le=23)
     minute: int = Field(ge=0, le=59)
+
+
+class SimulationStartRequest(BaseModel):
+    speed: int = Field(default=60, ge=1, description="Simulated minutes per real second")
 
 
 @app.on_event("startup")
@@ -132,3 +145,20 @@ def set_time(payload: TimeUpdate) -> dict[str, str]:
         "simulated_time": simulated_time.isoformat(),
         "real_time": _now_iso(),
     }
+
+
+@app.post("/simulation/start")
+async def start_simulation(payload: SimulationStartRequest) -> dict[str, object]:
+    await simulator.start(speed=payload.speed)
+    return simulator.status()
+
+
+@app.post("/simulation/stop")
+def stop_simulation() -> dict[str, object]:
+    simulator.stop()
+    return simulator.status()
+
+
+@app.get("/simulation/status")
+def get_simulation_status() -> dict[str, object]:
+    return simulator.status()

@@ -4,7 +4,7 @@ from typing import Generator
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.app.config import DATABASE_URL
+from app.config import DATABASE_URL
 
 
 def _ensure_sqlite_dir(database_url: str) -> None:

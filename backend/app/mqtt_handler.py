@@ -6,12 +6,12 @@ from typing import Any, Optional
 
 import paho.mqtt.client as mqtt
 
-from backend.app.config import ML_CONFIDENCE_THRESHOLD, MQTT_HOST, MQTT_PORT
-from backend.app.db import SessionLocal
-from backend.app.feature_builder import build_feature_vector
-from backend.app.ml_client import MLClient
-from backend.app.websocket_manager import WebSocketManager
-from backend.db.models import Device, Event, FeatureVector
+from app.config import ML_CONFIDENCE_THRESHOLD, MQTT_HOST, MQTT_PORT
+from app.db import SessionLocal
+from app.feature_builder import build_feature_vector
+from app.ml_client import MLClient
+from app.websocket_manager import WebSocketManager
+from db.models import Device, Event, FeatureVector
 
 
 logger = logging.getLogger(__name__)

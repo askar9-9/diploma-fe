@@ -24,8 +24,9 @@ describe('App', () => {
 
     render(<App />)
 
-    expect(screen.getAllByText('Dashboard')).toHaveLength(2)
-    expect(screen.getByText('Connected')).toBeInTheDocument()
+    expect(screen.getByText('Dashboard')).toBeInTheDocument()
+    expect(screen.getByText('HomeIQ Dashboard')).toBeInTheDocument()
+    expect(screen.getAllByText('Connected')).toHaveLength(2)
     expect(screen.getByText('Devices')).toBeInTheDocument()
   })
 })

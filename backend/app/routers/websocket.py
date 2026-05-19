@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, WebSocketException, status
 
-from backend.app.auth import verify_token
+from app.auth import verify_token
 
 
 router = APIRouter(tags=["websocket"])
