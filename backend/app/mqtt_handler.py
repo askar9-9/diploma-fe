@@ -1,26 +1,33 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Union
 
 import paho.mqtt.client as mqtt
+from sqlalchemy.orm import Session
 
 from app.config import ML_CONFIDENCE_THRESHOLD, MQTT_HOST, MQTT_PORT
 from app.db import SessionLocal
-from app.feature_builder import build_feature_vector
-from app.ml_client import MLClient
+from app.energy_service import add_energy_reading
+from app.ml_features import DEVICE_METADATA, MOTION_DEVICE_IDS, build_feature_vector
 from app.websocket_manager import WebSocketManager
-from db.models import Device, Event, FeatureVector
+from db.models import DeviceState, Entity, MLHistory
 
 
 logger = logging.getLogger(__name__)
 
 
+def entity_name_from_entity_id(entity_id: str) -> str:
+    return entity_id.split(".", 1)[1] if "." in entity_id else entity_id
+
+
 class MQTTHandler:
-    def __init__(self, ws_manager: WebSocketManager, ml_client: MLClient) -> None:
+    def __init__(self, ws_manager: WebSocketManager, app_state: Any) -> None:
         self.ws_manager = ws_manager
-        self.ml_client = ml_client
+        self.app_state = app_state
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.client = mqtt.Client()
         self.client.on_connect = self._on_connect
@@ -39,32 +46,25 @@ class MQTTHandler:
         except Exception:
             logger.exception("Failed to disconnect MQTT client cleanly")
 
-    def publish_device_command(self, device_id: str, value: float) -> None:
+    def publish_entity_command(self, domain: str, entity_name: str, state: str) -> None:
         self.client.publish(
-            f"homeiq/devices/{device_id}/command",
-            json.dumps({"value": value}),
+            f"homeiq/{domain}/{entity_name}/set",
+            json.dumps({"state": state}),
         )
 
-    def publish_scene_activate(self, scenario_id: str) -> None:
+    def publish_scene(self, scene: str) -> None:
         self.client.publish(
             "homeiq/scenes/activate",
-            json.dumps({"scene": scenario_id}),
+            json.dumps({"scene": scene}),
         )
 
-    def publish_simulation_control(self, action: str, speed: Optional[int] = None) -> None:
-        payload: dict[str, Any] = {"action": action}
-        if speed is not None:
-            payload["speed"] = speed
-        self.client.publish("homeiq/simulation/control", json.dumps(payload))
-
-    def _on_connect(self, client: mqtt.Client, userdata: Any, flags: dict, rc: int) -> None:
+    def _on_connect(self, client: mqtt.Client, userdata: Any, flags: dict[str, Any], rc: int) -> None:
         if rc != 0:
             logger.warning("MQTT connect returned rc=%s", rc)
             return
 
-        client.subscribe("homeiq/devices/+/state")
+        client.subscribe("homeiq/+/+/state")
         client.subscribe("homeiq/scenes/confirmed")
-        client.subscribe("homeiq/simulation/status")
 
     def _on_message(self, client: mqtt.Client, userdata: Any, msg: mqtt.MQTTMessage) -> None:
         if self.loop is None:
@@ -76,125 +76,186 @@ class MQTTHandler:
             logger.warning("MQTT payload is not valid JSON for topic %s", msg.topic)
             return
 
-        if msg.topic.endswith("/state"):
-            future = asyncio.run_coroutine_threadsafe(
-                self.handle_device_state(msg.topic, payload),
-                self.loop,
-            )
-            future.add_done_callback(self._log_future_error)
-        elif msg.topic == "homeiq/scenes/confirmed":
-            future = asyncio.run_coroutine_threadsafe(
-                self.ws_manager.broadcast({"type": "scene_confirmed", **payload}),
-                self.loop,
-            )
-            future.add_done_callback(self._log_future_error)
-        elif msg.topic == "homeiq/simulation/status":
-            future = asyncio.run_coroutine_threadsafe(
-                self.ws_manager.broadcast({"type": "simulation_status", **payload}),
-                self.loop,
-            )
-            future.add_done_callback(self._log_future_error)
+        if msg.topic == "homeiq/scenes/confirmed":
+            coroutine = self.handle_scene_confirmation(payload)
+        else:
+            coroutine = self.handle_state_message(msg.topic, payload)
 
-    def _log_future_error(self, future: asyncio.Future) -> None:
+        future = asyncio.run_coroutine_threadsafe(
+            coroutine,
+            self.loop,
+        )
+        future.add_done_callback(self._log_future_error)
+
+    def _log_future_error(self, future: asyncio.Future[Any]) -> None:
         try:
             future.result()
         except Exception:
             logger.exception("MQTT async task failed")
 
-    async def handle_device_state(self, topic: str, payload: dict[str, Any]) -> None:
-        device_id = topic.split("/")[2]
-        new_state = float(payload.get("value", 0.0))
+    async def handle_entity_state(self, topic: str, payload: dict[str, Any]) -> None:
+        parts = topic.split("/")
+        domain, entity_name = parts[1], parts[2]
+        entity_id = f"{domain}.{entity_name}"
+        new_state = str(payload.get("state", ""))
+        attributes_payload = payload.get("attributes")
+        new_attributes = attributes_payload if isinstance(attributes_payload, dict) else None
+
         session = SessionLocal()
         try:
-            device = session.query(Device).filter(Device.id == device_id).first()
-            if device is None:
+            entity = session.get(Entity, entity_id)
+            if entity is None:
+                logger.info("Ignoring MQTT update for unknown entity %s", entity_id)
                 return
 
-            now = datetime.utcnow()
-            device.state = new_state
-            device.updated_at = now
-            session.add(
-                Event(
-                    device_id=device_id,
-                    new_state=new_state,
-                    attributes=json.dumps(payload),
-                    created_at=now,
-                )
-            )
-            session.commit()
+            state_changed = entity.state != new_state
+            attributes_changed = new_attributes is not None and entity.attributes != new_attributes
 
-            devices = session.query(Device).all()
-            snapshot = {
-                item.id: {
-                    "state": item.state,
-                    "device_type": item.device_type,
-                }
-                for item in devices
-            }
-            vector = build_feature_vector(snapshot)
-            await self._coordinate_ml(session, vector)
+            if not state_changed and not attributes_changed:
+                return
+
+            entity.state = new_state
+            if new_attributes is not None:
+                entity.attributes = new_attributes
+            entity.updated_at = datetime.utcnow()
+
+            if state_changed and entity.domain in {"switch", "light"}:
+                add_energy_reading(session, entity.updated_at)
+
+            session.commit()
+            session.refresh(entity)
+
             await self.ws_manager.broadcast(
                 {
-                    "type": "device_update",
-                    "device_id": device_id,
-                    "value": new_state,
+                    "type": "state_changed",
+                    "entity_id": entity.entity_id,
+                    "state": entity.state,
+                    "attributes": entity.attributes or {},
                 }
             )
+            await self._run_ml_classification(session)
         finally:
             session.close()
 
-    async def _coordinate_ml(
-        self,
-        session,
-        feature_vector: dict[str, Any],
-    ) -> None:
-        now = datetime.utcnow()
-        predicted_scenario = None
-        confidence = None
-        decision_source = "classifier"
+    async def handle_state_message(self, topic: str, payload: dict[str, Any]) -> None:
+        parts = topic.split("/")
+        if len(parts) != 4 or parts[0] != "homeiq" or parts[3] != "state":
+            logger.warning("Unexpected MQTT topic: %s", topic)
+            return
+
+        if parts[1] == "devices":
+            await self.handle_device_state(parts[2], payload)
+            return
+
+        await self.handle_entity_state(topic, payload)
+
+    async def handle_device_state(self, device_id: str, payload: dict[str, Any]) -> None:
+        raw_value = payload.get("value", payload.get("state", 0.0))
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            logger.warning("Invalid device value for %s: %r", device_id, raw_value)
+            return
+
+        timestamp_raw = payload.get("timestamp")
+        updated_at = datetime.utcnow()
+        if isinstance(timestamp_raw, str):
+            try:
+                updated_at = datetime.fromisoformat(timestamp_raw)
+            except ValueError:
+                logger.warning("Invalid device timestamp for %s: %s", device_id, timestamp_raw)
+
+        if device_id in MOTION_DEVICE_IDS and value > 0.0:
+            self.app_state.last_motion_at = updated_at
+
+        session = SessionLocal()
+        try:
+            device_type = DEVICE_METADATA.get(device_id, {}).get("device_type", "float")
+            device_state = session.get(DeviceState, device_id)
+            if device_state is None:
+                device_state = DeviceState(
+                    id=device_id,
+                    device_type=device_type,
+                    value=value,
+                    updated_at=updated_at,
+                )
+                session.add(device_state)
+            else:
+                device_state.device_type = device_type
+                device_state.value = value
+                device_state.updated_at = updated_at
+
+            session.commit()
+            await self._run_ml_classification(session)
+        finally:
+            session.close()
+
+    async def handle_scene_confirmation(self, payload: dict[str, Any]) -> None:
+        scene = str(payload.get("scene", "")).strip()
+        if not scene:
+            return
+
+        self.app_state.current_scene = scene
+
+    def _build_feature_vector(self, session: Session) -> Dict[str, Union[int, float]]:
+        return build_feature_vector(
+            session,
+            last_motion_at=getattr(self.app_state, "last_motion_at", None),
+        )
+
+    async def _run_ml_classification(self, session: Session) -> None:
+        feature_vector = self._build_feature_vector(session)
 
         try:
-            result = await self.ml_client.classify(feature_vector)
-            predicted_scenario = result.get("scenario")
-            confidence = result.get("confidence")
+            result = await self.app_state.ml_client.classify(feature_vector)
+        except Exception:
+            logger.warning("ML classify call failed", exc_info=True)
+            return
 
-            if confidence is not None and confidence >= ML_CONFIDENCE_THRESHOLD and predicted_scenario:
-                self.publish_scene_activate(predicted_scenario)
-            else:
-                decision_source = "clusterer"
-                try:
-                    await self.ml_client.cluster([feature_vector])
-                except Exception:
-                    logger.exception("Cluster fallback failed")
+        scenario = str(result.get("scenario", ""))
+        confidence = float(result.get("confidence", 0.0))
+        probabilities = result.get("probabilities", {})
+        if not isinstance(probabilities, dict):
+            probabilities = {}
 
+        applied = confidence >= ML_CONFIDENCE_THRESHOLD
+        ml_record = MLHistory(
+            scenario=scenario,
+            confidence=confidence,
+            probabilities=probabilities,
+            applied=applied,
+            feature_vector=feature_vector,
+            triggered_by="auto",
+        )
+        session.add(ml_record)
+        session.commit()
+        session.refresh(ml_record)
+
+        should_activate_scene = applied and bool(scenario) and scenario != self.app_state.current_scene
+        if applied:
+            self.app_state.current_scene = scenario or self.app_state.current_scene
+            self.app_state.last_confidence = confidence
+            self.app_state.last_decision_at = ml_record.created_at.isoformat()
+
+        if should_activate_scene:
+            self.publish_scene(scenario)
+
+        await self.ws_manager.broadcast(
+            {
+                "type": "ml_decision",
+                "scenario": scenario,
+                "confidence": confidence,
+                "probabilities": probabilities,
+                "applied": applied,
+                "feature_vector": feature_vector,
+            }
+        )
+        if should_activate_scene:
             await self.ws_manager.broadcast(
                 {
-                    "type": "ml_decision",
-                    "scenario": predicted_scenario,
+                    "type": "scene_changed",
+                    "scene": scenario,
                     "confidence": confidence,
-                    "probabilities": result.get("probabilities"),
-                    "alternative": result.get("alternative"),
-                    "source": decision_source,
+                    "triggered_by": "auto",
                 }
             )
-        except Exception:
-            decision_source = "unavailable"
-            logger.exception("ML classification failed")
-
-        session.add(
-            FeatureVector(
-                hour_of_day=feature_vector["hour_of_day"],
-                weekday=feature_vector["weekday"],
-                motion_hall=feature_vector["motion_hall"],
-                motion_living=feature_vector["motion_living"],
-                temperature=feature_vector["temperature"],
-                light_level=feature_vector["light_level"],
-                tv_on=feature_vector["tv_on"],
-                minutes_idle=feature_vector["minutes_idle"],
-                predicted_scenario=predicted_scenario,
-                confidence=confidence,
-                decision_source=decision_source,
-                created_at=now,
-            )
-        )
-        session.commit()

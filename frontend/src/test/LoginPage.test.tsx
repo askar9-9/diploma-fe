@@ -13,8 +13,8 @@ describe('LoginPage', () => {
         <LoginPage />
       </MemoryRouter>,
     )
-    expect(screen.getByPlaceholderText('Username')).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('Password')).toBeInTheDocument()
+    expect(screen.getByLabelText('Логин')).toBeInTheDocument()
+    expect(screen.getByLabelText('Пароль')).toBeInTheDocument()
   })
 
   it('shows error on failed login', async () => {
@@ -26,8 +26,8 @@ describe('LoginPage', () => {
       </MemoryRouter>,
     )
 
-    fireEvent.change(screen.getByPlaceholderText('Username'), { target: { value: 'wrong' } })
-    fireEvent.change(screen.getByPlaceholderText('Password'), { target: { value: 'wrong' } })
+    fireEvent.change(screen.getByLabelText('Логин'), { target: { value: 'wrong' } })
+    fireEvent.change(screen.getByLabelText('Пароль'), { target: { value: 'wrong' } })
     fireEvent.click(screen.getByRole('button'))
     await waitFor(() => expect(screen.getByText(/Неверный/)).toBeInTheDocument())
   })

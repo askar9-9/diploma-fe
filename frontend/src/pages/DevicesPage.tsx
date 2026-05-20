@@ -1,207 +1,405 @@
-import { useEffect, useState } from 'react'
-import { PersonStanding, Sofa, Thermometer, Sun, Lightbulb, Lamp, Tv, SlidersHorizontal } from 'lucide-react'
-import { devicesApi } from '../api/devicesApi'
-import type { Device } from '../api/devicesApi'
-import { useWebSocket } from '../hooks/useWebSocket'
+import { Plus, X } from 'lucide-react'
+import { useState, type ChangeEvent, type FormEvent } from 'react'
+import { EntityCard } from '../components/ui/EntityCard'
+import { useHomeData } from '../context/HomeDataContext'
+import { DOMAIN_OPTIONS, getRoomLabel, isEntityActive, ROOM_OPTIONS } from '../lib/home'
+import type { CreateEntityRequest, Entity } from '../types/home'
 
-const DEVICE_ICONS: Record<string, React.ElementType> = {
-  motion_hall: PersonStanding,
-  motion_living: Sofa,
-  temperature: Thermometer,
-  light_level: Sun,
-  ceiling_light: Lightbulb,
-  bedside_light: Lamp,
-  thermostat: Thermometer,
-  tv_on: Tv,
+type DomainFilter = 'all' | 'lighting' | 'sensors' | 'devices'
+type RoomFilter = 'all' | (typeof ROOM_OPTIONS)[number]['value']
+
+const DEVICE_FORM_INITIAL: CreateEntityRequest = {
+  entity_id: '',
+  name: '',
+  model: '',
+  domain: 'binary_sensor',
+  room: 'hallway',
+  doc_url: '',
 }
 
-const DEVICE_NAMES: Record<string, string> = {
-  motion_hall: 'Датчик коридора',
-  motion_living: 'Датчик гостиной',
-  temperature: 'Температура',
-  light_level: 'Освещённость',
-  ceiling_light: 'Основной свет',
-  bedside_light: 'Ночник',
-  thermostat: 'Термостат',
-  tv_on: 'Телевизор',
+const ROOM_FILTERS: Array<{ label: string; value: RoomFilter }> = [
+  { label: 'Все', value: 'all' },
+  ...ROOM_OPTIONS.map((room) => ({ label: room.label, value: room.value })),
+]
+
+const DOMAIN_FILTERS: Array<{ label: string; value: DomainFilter }> = [
+  { label: 'Все', value: 'all' },
+  { label: 'Датчики', value: 'sensors' },
+  { label: 'Устройства', value: 'devices' },
+  { label: 'Освещение', value: 'lighting' },
+]
+
+function matchesDomainFilter(entity: Entity, filter: DomainFilter) {
+  if (filter === 'all') return true
+  if (filter === 'sensors') return entity.domain === 'sensor' || entity.domain === 'binary_sensor'
+  if (filter === 'devices') return entity.domain === 'switch' || entity.domain === 'climate'
+  return entity.domain === 'light'
 }
 
-const SENSOR_IDS = ['motion_hall', 'motion_living', 'temperature', 'light_level']
-const ACTUATOR_IDS = ['ceiling_light', 'bedside_light', 'thermostat', 'tv_on']
-const BINARY_ACTUATORS = new Set(['ceiling_light', 'bedside_light', 'tv_on'])
-
-function formatSensorValue(id: string, value: number): string {
-  if (id === 'temperature') return `${value.toFixed(1)}°C`
-  if (id === 'light_level') return `${value.toFixed(1)}%`
-  return value ? 'ВКЛ' : 'ВЫКЛ'
-}
-
-function formatTime(isoString: string): string {
-  const d = new Date(isoString)
-  return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-}
+const ENTITY_ID_REGEX = /^(binary_sensor|sensor|switch|light|climate)\.[a-z][a-z0-9_]{2,63}$/
 
 export default function DevicesPage() {
-  const { lastMessage } = useWebSocket()
-  const [devices, setDevices] = useState<Record<string, Device>>({})
-  const [loading, setLoading] = useState<Record<string, boolean>>({})
-  const [thermostatDraft, setThermostatDraft] = useState<number>(22)
+  const { createEntity, deleteEntity, entities, error, loading, sendEntityCommand } = useHomeData()
+  const [roomFilter, setRoomFilter] = useState<RoomFilter>('all')
+  const [domainFilter, setDomainFilter] = useState<DomainFilter>('all')
+  const [formState, setFormState] = useState<CreateEntityRequest>(DEVICE_FORM_INITIAL)
+  const [formError, setFormError] = useState<string | null>(null)
+  const [entityIdError, setEntityIdError] = useState<string | null>(null)
+  const [isDialogOpen, setIsDialogOpen] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [pendingEntityId, setPendingEntityId] = useState<string | null>(null)
 
-  useEffect(() => {
-    devicesApi.list().then((res) => {
-      const map: Record<string, Device> = {}
-      res.data.forEach((d) => { map[d.id] = d })
-      setDevices(map)
-      if (map['thermostat']) {
-        setThermostatDraft(map['thermostat'].state)
+  const filteredEntities = entities.filter(
+    (entity) =>
+      (roomFilter === 'all' || entity.room === roomFilter) &&
+      matchesDomainFilter(entity, domainFilter),
+  )
+
+  const deviceCountsByRoom = ROOM_OPTIONS.map((room) => ({
+    ...room,
+    count: entities.filter((entity) => entity.room === room.value).length,
+  }))
+
+  function handleFormChange(event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
+    const { name, value } = event.target
+    setFormState((s) => ({ ...s, [name]: value }))
+
+    if (name === 'entity_id') {
+      if (value && !ENTITY_ID_REGEX.test(value)) {
+        setEntityIdError('Формат: {domain}.{name} — только строчные буквы и цифры')
+      } else {
+        setEntityIdError(null)
       }
-    }).catch(() => {})
-  }, [])
-
-  useEffect(() => {
-    if (!lastMessage) return
-    const msg = lastMessage as unknown as Record<string, unknown>
-    if (msg.type === 'device_update') {
-      const deviceId = msg.device_id as string
-      const value = msg.value as number
-      setDevices((prev) => {
-        if (!prev[deviceId]) return prev
-        return {
-          ...prev,
-          [deviceId]: { ...prev[deviceId], state: value, updated_at: new Date().toISOString() },
-        }
-      })
-      if (deviceId === 'thermostat') setThermostatDraft(value)
-    }
-  }, [lastMessage])
-
-  const sendCommand = async (deviceId: string, value: number) => {
-    setLoading((prev) => ({ ...prev, [deviceId]: true }))
-    try {
-      await devicesApi.command(deviceId, value)
-      setDevices((prev) => ({
-        ...prev,
-        [deviceId]: { ...prev[deviceId], state: value, updated_at: new Date().toISOString() },
-      }))
-    } catch {
-      // ignore
-    } finally {
-      setLoading((prev) => ({ ...prev, [deviceId]: false }))
     }
   }
 
+  function closeDialog() {
+    setIsDialogOpen(false)
+    setFormError(null)
+    setEntityIdError(null)
+    setFormState(DEVICE_FORM_INITIAL)
+  }
+
+  async function handleCreateEntity(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (entityIdError) return
+    setIsSubmitting(true)
+    setFormError(null)
+
+    try {
+      await createEntity(formState)
+      closeDialog()
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } })?.response?.status
+      if (status === 409) {
+        setFormError('Entity ID уже занят. Выберите другой.')
+      } else {
+        setFormError('Не удалось добавить устройство. Проверьте данные и повторите попытку.')
+      }
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  async function handleToggle(entity: Entity) {
+    setPendingEntityId(entity.entity_id)
+    try {
+      await sendEntityCommand(entity.entity_id, {
+        state: isEntityActive(entity) ? 'off' : 'on',
+      })
+    } finally {
+      setPendingEntityId(null)
+    }
+  }
+
+  async function handleDelete(entity: Entity) {
+    try {
+      await deleteEntity(entity.entity_id)
+    } catch {
+      // silently ignore
+    }
+  }
+
+  const inputClass =
+    'w-full rounded-xl border border-gray-600 bg-gray-700 px-4 py-3 text-white placeholder-gray-500 focus:border-sky-500 focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-gray-800 text-sm'
+  const selectClass =
+    'w-full rounded-xl border border-gray-600 bg-gray-700 px-4 py-3 text-white focus:border-sky-500 focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-gray-800 text-sm'
+
   return (
-    <div className="min-h-screen bg-gray-900 text-white p-6 space-y-8">
-      <h1 className="text-2xl font-bold">Устройства</h1>
+    <div className="space-y-6 pb-24">
+      <div>
+        <h1 className="text-2xl font-semibold text-white">Устройства</h1>
+        <p className="mt-1 text-sm text-gray-400">
+          Устройства умного дома с фильтрами по комнате и домену.
+        </p>
+      </div>
 
-      {/* Sensors */}
-      <section>
-        <h2 className="text-lg font-semibold text-gray-300 mb-3">Датчики</h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {SENSOR_IDS.map((id) => {
-            const device = devices[id]
-            const Icon = DEVICE_ICONS[id]
-            return (
-              <div key={id} className="bg-gray-800 rounded-xl p-4 border border-gray-700">
-                <div className="flex items-center justify-between mb-2">
-                  {Icon && <Icon size={20} className="text-indigo-400" />}
-                  <span className="text-xs bg-gray-700 text-gray-400 px-2 py-0.5 rounded-full">только чтение</span>
-                </div>
-                <div className="font-medium text-gray-300 text-sm mb-1">{DEVICE_NAMES[id]}</div>
-                {device ? (
-                  <>
-                    <div className="text-xl font-bold text-indigo-400">
-                      {formatSensorValue(id, device.state)}
-                    </div>
-                    <div className="text-xs text-gray-500 mt-1">{formatTime(device.updated_at)}</div>
-                  </>
-                ) : (
-                  <div className="text-gray-500 text-sm">Загрузка...</div>
-                )}
-              </div>
-            )
-          })}
+      {error ? (
+        <div role="alert" className="rounded-xl border border-amber-700 bg-amber-900/30 px-4 py-3 text-sm text-amber-300">
+          {error}
+        </div>
+      ) : null}
+
+      <section className="space-y-4 rounded-xl border border-gray-700 bg-gray-800 p-4">
+        <h2 className="text-sm font-semibold text-white">Фильтр по комнате</h2>
+        <div className="flex flex-wrap gap-2">
+          {ROOM_FILTERS.map((room) => (
+            <button
+              key={room.value}
+              type="button"
+              onClick={() => setRoomFilter(room.value)}
+              className={`rounded-full px-3 py-1.5 text-sm font-medium transition-colors duration-150 focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-gray-900 ${
+                roomFilter === room.value
+                  ? 'bg-sky-500 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              {room.label}
+            </button>
+          ))}
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          {deviceCountsByRoom.map((room) => (
+            <div key={room.value} className="rounded-lg bg-gray-700/50 px-3 py-2">
+              <p className="text-sm font-medium text-white">{room.label}</p>
+              <p className="mt-0.5 text-xs text-gray-400">{room.count} устройств</p>
+            </div>
+          ))}
         </div>
       </section>
 
-      {/* Actuators */}
-      <section>
-        <h2 className="text-lg font-semibold text-gray-300 mb-3">Исполнительные устройства</h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {ACTUATOR_IDS.map((id) => {
-            const device = devices[id]
-            const isLoading = loading[id] || false
-            const Icon = DEVICE_ICONS[id]
-            const isOn = !!device?.state
+      <section className="space-y-3 rounded-xl border border-gray-700 bg-gray-800 p-4">
+        <h2 className="text-sm font-semibold text-white">Фильтр по домену</h2>
+        <div className="flex flex-wrap gap-2">
+          {DOMAIN_FILTERS.map((filter) => (
+            <button
+              key={filter.value}
+              type="button"
+              onClick={() => setDomainFilter(filter.value)}
+              className={`rounded-full px-3 py-1.5 text-sm font-medium transition-colors duration-150 focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-gray-900 ${
+                domainFilter === filter.value
+                  ? 'bg-gray-600 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              {filter.label}
+            </button>
+          ))}
+        </div>
+      </section>
 
-            return (
-              <div
-                key={id}
-                className={`rounded-xl p-4 border transition-colors ${
-                  id !== 'thermostat' && isOn
-                    ? 'bg-indigo-900/20 border-indigo-700'
-                    : 'bg-gray-800 border-gray-700'
-                }`}
-              >
-                <div className="flex items-center gap-2 mb-3">
-                  {Icon && (
-                    <Icon
-                      size={20}
-                      className={id !== 'thermostat' && isOn ? 'text-indigo-300' : 'text-gray-400'}
-                    />
-                  )}
-                  <span className="font-medium text-gray-300 text-sm">{DEVICE_NAMES[id]}</span>
+      {loading && entities.length === 0 ? (
+        <div className="flex items-center justify-center py-16">
+          <span className="h-8 w-8 animate-spin rounded-full border-2 border-sky-500 border-t-transparent" aria-label="Загрузка..." />
+        </div>
+      ) : null}
+
+      <section className="space-y-4">
+        <div>
+          <h2 className="text-base font-semibold text-white">Список устройств</h2>
+          <p className="text-sm text-gray-400">
+            Найдено {filteredEntities.length} устройств
+            {roomFilter !== 'all' ? ` в комнате «${getRoomLabel(roomFilter)}»` : ''}
+            {domainFilter !== 'all'
+              ? ` по фильтру «${DOMAIN_FILTERS.find((f) => f.value === domainFilter)?.label}»`
+              : ''}
+            .
+          </p>
+        </div>
+
+        {filteredEntities.length === 0 && !loading ? (
+          <div className="rounded-xl border border-gray-700 bg-gray-800 px-6 py-12 text-center">
+            <p className="text-sm text-gray-500">
+              {entities.length === 0
+                ? 'Устройства не найдены. Добавьте первое устройство.'
+                : 'Сущности по выбранным фильтрам не найдены.'}
+            </p>
+          </div>
+        ) : (
+          <div className="grid gap-4 xl:grid-cols-2">
+            {filteredEntities.map((entity) => (
+              <EntityCard
+                key={entity.entity_id}
+                entity={entity}
+                onToggle={handleToggle}
+                onDelete={handleDelete}
+                toggling={pendingEntityId === entity.entity_id}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
+      <button
+        type="button"
+        onClick={() => setIsDialogOpen(true)}
+        aria-label="Добавить устройство"
+        className="fixed bottom-6 right-6 inline-flex items-center gap-3 rounded-full bg-sky-500 px-5 py-4 text-sm font-semibold text-white shadow-lg shadow-sky-900/30 transition hover:bg-sky-600 focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-gray-900"
+      >
+        <Plus aria-hidden="true" size={18} />
+        <span className="hidden sm:inline">Добавить устройство</span>
+      </button>
+
+      {isDialogOpen ? (
+        <div className="fixed inset-0 z-40">
+          <button
+            type="button"
+            aria-label="Закрыть диалог"
+            className="absolute inset-0 bg-gray-950/70"
+            onClick={closeDialog}
+          />
+          <div className="absolute inset-0 flex items-center justify-center p-4">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="add-entity-title"
+              className="relative z-10 w-full max-w-2xl rounded-xl border border-gray-700 bg-gray-800 p-6 shadow-2xl"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 id="add-entity-title" className="text-xl font-semibold text-white">
+                    Добавить устройство
+                  </h2>
+                  <p className="mt-1 text-sm text-gray-400">
+                    Создайте новую сущность и добавьте её в нужную комнату.
+                  </p>
                 </div>
+                <button
+                  type="button"
+                  onClick={closeDialog}
+                  className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-700 hover:text-white focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-gray-800"
+                >
+                  <X aria-hidden="true" size={18} />
+                </button>
+              </div>
 
-                {id === 'thermostat' ? (
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-1">
-                      <SlidersHorizontal size={14} className="text-gray-400" />
-                      <span className="text-xs text-gray-400">Температура</span>
-                    </div>
-                    <div className="text-xl font-bold text-indigo-400">
-                      {thermostatDraft.toFixed(1)}°C
-                    </div>
+              <form className="mt-5 space-y-4" onSubmit={handleCreateEntity}>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label className="space-y-1.5 text-sm font-medium text-gray-300">
+                    <span>Entity ID <span className="text-red-400">*</span></span>
                     <input
-                      type="range"
-                      min={17}
-                      max={25}
-                      step={0.5}
-                      value={thermostatDraft}
-                      onChange={(e) => setThermostatDraft(parseFloat(e.target.value))}
-                      onMouseUp={() => sendCommand('thermostat', thermostatDraft)}
-                      onTouchEnd={() => sendCommand('thermostat', thermostatDraft)}
-                      disabled={isLoading}
-                      className="w-full accent-indigo-500 disabled:opacity-50"
+                      name="entity_id"
+                      value={formState.entity_id}
+                      onChange={handleFormChange}
+                      placeholder="binary_sensor.motion_hallway"
+                      className={inputClass}
+                      required
                     />
-                    <div className="flex justify-between text-xs text-gray-500">
-                      <span>17°C</span><span>25°C</span>
-                    </div>
-                  </div>
-                ) : BINARY_ACTUATORS.has(id) ? (
-                  <div className="flex items-center justify-between">
-                    <span className={`font-bold text-lg ${isOn ? 'text-green-400' : 'text-gray-500'}`}>
-                      {isOn ? 'ВКЛ' : 'ВЫКЛ'}
-                    </span>
-                    <button
-                      onClick={() => device && sendCommand(id, device.state ? 0 : 1)}
-                      disabled={isLoading || !device}
-                      className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50
-                        ${isOn
-                          ? 'bg-gray-600 hover:bg-gray-500 text-white'
-                          : 'bg-indigo-600 hover:bg-indigo-500 text-white'}`}
+                    {entityIdError && (
+                      <p className="text-xs text-red-400">{entityIdError}</p>
+                    )}
+                  </label>
+                  <label className="space-y-1.5 text-sm font-medium text-gray-300">
+                    <span>Название <span className="text-red-400">*</span></span>
+                    <input
+                      name="name"
+                      value={formState.name}
+                      onChange={handleFormChange}
+                      placeholder="Xiaomi Mi Motion Sensor 2"
+                      className={inputClass}
+                      required
+                      minLength={2}
+                    />
+                  </label>
+                  <label className="space-y-1.5 text-sm font-medium text-gray-300">
+                    <span>Модель</span>
+                    <input
+                      name="model"
+                      value={formState.model}
+                      onChange={handleFormChange}
+                      placeholder="RTCGQ02LM"
+                      className={inputClass}
+                    />
+                  </label>
+                  <label className="space-y-1.5 text-sm font-medium text-gray-300">
+                    <span>Домен <span className="text-red-400">*</span></span>
+                    <select
+                      name="domain"
+                      value={formState.domain}
+                      onChange={handleFormChange}
+                      className={selectClass}
                     >
-                      {isLoading ? (
-                        <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      ) : isOn ? 'Выключить' : 'Включить'}
-                    </button>
-                  </div>
+                      {DOMAIN_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-1.5 text-sm font-medium text-gray-300">
+                    <span>Комната <span className="text-red-400">*</span></span>
+                    <select
+                      name="room"
+                      value={formState.room}
+                      onChange={handleFormChange}
+                      className={selectClass}
+                    >
+                      {ROOM_OPTIONS.map((room) => (
+                        <option key={room.value} value={room.value}>
+                          {room.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-1.5 text-sm font-medium text-gray-300">
+                    <span>Мощность (кВт)</span>
+                    <input
+                      name="power_kw"
+                      type="number"
+                      min="0"
+                      max="50"
+                      step="0.01"
+                      value={String((formState as unknown as Record<string, unknown>).power_kw ?? '0')}
+                      onChange={handleFormChange}
+                      placeholder="0.15"
+                      className={inputClass}
+                    />
+                  </label>
+                  <label className="space-y-1.5 text-sm font-medium text-gray-300 sm:col-span-2">
+                    <span>Документация (URL)</span>
+                    <input
+                      name="doc_url"
+                      type="url"
+                      value={formState.doc_url}
+                      onChange={handleFormChange}
+                      placeholder="https://www.mi.com/global/product/..."
+                      className={inputClass}
+                    />
+                  </label>
+                </div>
+
+                {formError ? (
+                  <p role="alert" className="rounded-xl border border-red-800 bg-red-900/30 px-4 py-3 text-sm text-red-400">
+                    {formError}
+                  </p>
                 ) : null}
-              </div>
-            )
-          })}
+
+                <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                  <button
+                    type="button"
+                    onClick={closeDialog}
+                    className="rounded-xl border border-gray-600 px-4 py-2.5 text-sm font-semibold text-gray-300 transition hover:bg-gray-700 focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-gray-800"
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSubmitting || !!entityIdError}
+                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-sky-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-600 focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-gray-800 disabled:opacity-60"
+                  >
+                    {isSubmitting ? (
+                      <span aria-label="Загрузка..." className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                    ) : (
+                      <Plus aria-hidden="true" size={16} />
+                    )}
+                    Добавить устройство
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
         </div>
-      </section>
+      ) : null}
     </div>
   )
 }

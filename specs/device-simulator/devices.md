@@ -2,13 +2,13 @@
 
 ## Назначение
 
-Реестр виртуальных IoT-устройств умного дома. Хранит состояния 8 устройств в памяти (dict). Предоставляет чистые функции для чтения и обновления состояний — без side effects (MQTT вызывается снаружи).
+Реестр виртуальных IoT-устройств умного дома. Хранит состояния 11 устройств в памяти (dict). Предоставляет чистые функции для чтения и обновления состояний — без side effects (MQTT вызывается снаружи).
 
 ## Контракт
 
 ```python
 # Константы
-INITIAL_DEVICES: dict[str, dict]  # начальные состояния 8 устройств
+INITIAL_DEVICES: dict[str, dict]  # начальные состояния 11 устройств
 
 # Функции (чистые — без MQTT side effects)
 def get_all_devices(devices: dict) -> dict
@@ -37,6 +37,9 @@ INITIAL_DEVICES = {
     "bedside_light": {"type": "binary", "state": 0},
     "thermostat":    {"type": "float",  "state": 20.0},
     "tv_on":         {"type": "binary", "state": 0},
+    "solar_panel":   {"type": "float",  "state": 0.0},
+    "home_battery":  {"type": "float",  "state": 50.0},
+    "ev_charger":    {"type": "float",  "state": 0.0},
 }
 ```
 
@@ -45,7 +48,7 @@ INITIAL_DEVICES = {
 ### test_initial_state
 - Given: реестр проинициализирован через INITIAL_DEVICES
 - When: читаем все устройства
-- Then: все 8 устройств присутствуют с правильными начальными состояниями
+- Then: все 11 устройств присутствуют с правильными начальными состояниями
 
 ### test_update_binary
 - Given: motion_hall имеет state=0
@@ -67,4 +70,4 @@ INITIAL_DEVICES = {
 ### test_get_all_devices
 - Given: реестр проинициализирован
 - When: get_all_devices(devices)
-- Then: возвращается словарь с ровно 8 ключами, соответствующими INITIAL_DEVICES
+- Then: возвращается словарь с ровно 11 ключами, соответствующими INITIAL_DEVICES

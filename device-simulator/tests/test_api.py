@@ -28,7 +28,33 @@ def test_get_devices() -> None:
     response = client.get("/devices")
 
     assert response.status_code == 200
-    assert len(response.json()) == 8
+    devices = response.json()
+
+    assert len(devices) == 11
+    assert {"solar_panel", "battery_soc", "grid_power"} <= set(devices)
+
+
+def test_get_energy_summary() -> None:
+    client, _ = build_client()
+    main.registry.set_state("ceiling_light", 1.0)
+    main.registry.set_state("thermostat", 22.0)
+    main.registry.set_state("solar_panel", 1500.0)
+    main.registry.set_state("battery_soc", 67.0)
+    main.registry.set_state("grid_power", 560.0)
+
+    response = client.get("/devices/energy")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "total_load_kw": 2.06,
+        "solar_kw": 1.5,
+        "grid_kw": 0.56,
+        "battery_soc_pct": 67.0,
+        "by_device": {
+            "ceiling_light": 0.06,
+            "thermostat": 2.0,
+        },
+    }
 
 
 def test_set_device_state() -> None:

@@ -1,24 +1,35 @@
-from datetime import datetime
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 from fastapi import APIRouter, Depends
 
 from app.auth import get_current_user
-from app.config import ML_SERVICE_URL
-from app.ml_client import MLClient
+from app.db import get_db
+from db.models import EnergyReading
 
 
-router = APIRouter(prefix="/energy", tags=["energy"])
+router = APIRouter(
+    prefix="/energy",
+    tags=["energy"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
-def get_ml_client() -> MLClient:
-    return MLClient(ML_SERVICE_URL)
+@router.get("/history")
+def get_energy_history(db: Session = Depends(get_db)) -> dict[str, list[dict[str, object]]]:
+    rows = (
+        db.query(
+            EnergyReading.date.label("date"),
+            func.sum(EnergyReading.total_kwh).label("total_kwh"),
+        )
+        .group_by(EnergyReading.date)
+        .order_by(EnergyReading.date.desc())
+        .limit(7)
+        .all()
+    )
 
-
-@router.get("/forecast")
-async def get_energy_forecast(
-    current_user=Depends(get_current_user),
-    ml: MLClient = Depends(get_ml_client),
-):
-    """Прогноз энергопотребления на 24 часа."""
-    now = datetime.utcnow()
-    return await ml.energy_forecast(now.hour, now.weekday())
+    days = [
+        {"date": row.date, "total_kwh": float(row.total_kwh)}
+        for row in reversed(rows)
+    ]
+    return {"days": days}

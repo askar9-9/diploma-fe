@@ -1,110 +1,51 @@
-from __future__ import annotations
+from typing import Literal
 
-from typing import Optional
-
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
-class FeatureVector(BaseModel):
-    hour_of_day: int
-    weekday: int
-    motion_hall: int
-    motion_living: int
+class OptimizeRequest(BaseModel):
+    load_forecast: list[float] = Field(..., min_length=24, max_length=24)
+    solar_forecast: list[float] = Field(..., min_length=24, max_length=24)
+    battery_capacity: float = Field(..., ge=0)
+    initial_soc: float = Field(..., ge=0)
+    max_charge_rate: float = Field(..., ge=0)
+    max_discharge_rate: float = Field(..., ge=0)
+    prices: list[float] = Field(..., min_length=24, max_length=24)
+
+
+class ScheduleStep(BaseModel):
+    hour: int
+    charge: float
+    discharge: float
+    grid_import: float
+    battery_soc: float
+
+
+class OptimizeResponse(BaseModel):
+    schedule: list[ScheduleStep]
+    total_cost: float
+
+
+SceneLabel = Literal["day", "night", "away", "movie"]
+
+
+class SceneFeatures(BaseModel):
+    hour_of_day: float
+    weekday: float
+    motion_hall: float
+    motion_living: float
     temperature: float
     light_level: float
-    tv_on: int
-    minutes_idle: int
+    tv_on: float
+    minutes_idle: float
 
 
-class ClassificationResult(BaseModel):
-    scenario: str
+class ClassifyRequest(BaseModel):
+    features: SceneFeatures
+
+
+class ClassifyResponse(BaseModel):
+    scenario: SceneLabel
     confidence: float
     probabilities: dict[str, float]
-    alternative: Optional[str]
-
-
-class ClusterResult(BaseModel):
-    n_clusters: int
-    labels: list[int]
-    centroids: list[list[float]]
-    inertia: float
-
-
-class PatternSuggestion(BaseModel):
-    cluster_id: int
-    occurrence_count: int
-    time_window: dict
-    weekdays: list[int]
-    median_values: dict
-
-
-class ClusterRequest(BaseModel):
-    vectors: list[FeatureVector]
-    n_clusters: int = Field(default=4, ge=1)
-
-
-class SuggestRequest(BaseModel):
-    vectors: list[FeatureVector]
-    labels: list[int]
-    known_scenarios: list[str]
-
-
-class TrainRequest(BaseModel):
-    vectors: list[FeatureVector]
-    labels: list[str]
-
-
-class HealthResponse(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())
-
-    status: str
-    model_loaded: bool
-
-
-class ModelInfoResponse(BaseModel):
-    version: str
-    trained_at: str | None
-    n_classes: int
-    accuracy: float
-
-
-class EnergyHourForecast(BaseModel):
-    hour: int
-    offset_hours: int
-    scenario: str
-    confidence: float
-    consumption_wh: float
-    consumption_kwh: float
-    devices: dict[str, float]
-
-
-class EnergyForecastResponse(BaseModel):
-    current_hour: int
-    weekday: int
-    forecast: list[EnergyHourForecast]
-    total_kwh: float
-    peak_hour: int
-    peak_consumption_wh: float
-    recommendations: list[str]
-
-
-class EnergyForecastRequest(BaseModel):
-    current_hour: int = Field(ge=0, le=23)
-    weekday: int = Field(ge=0, le=6)
-
-
-class AnomalyRequest(BaseModel):
-    hour_of_day: int
-    weekday: int
-    motion_hall: int
-    motion_living: int
-    temperature: float
-    light_level: float
-    tv_on: int
-    minutes_idle: int
-
-
-class AnomalyResult(BaseModel):
-    anomaly: bool
-    score: float
-    reason: str
+    alternative: SceneLabel

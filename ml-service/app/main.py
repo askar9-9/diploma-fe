@@ -1,141 +1,124 @@
-from __future__ import annotations
+from datetime import datetime
 
-from contextlib import asynccontextmanager
-from pathlib import Path
-
-import numpy as np
 from fastapi import FastAPI
 
-from app.anomaly_detector import AnomalyDetector
-from app.classifier import ScenarioClassifier
-from app.clusterer import ScenarioClusterer
-from app.constants import FEATURE_COLUMNS
-from app.energy_forecaster import EnergyForecaster
-from app.model_store import MODEL_PATH, load_latest_model, save_model
-from app.schemas import (
-    AnomalyRequest,
-    AnomalyResult,
-    ClassificationResult,
-    ClusterRequest,
-    ClusterResult,
-    EnergyForecastRequest,
-    EnergyForecastResponse,
-    FeatureVector,
-    PatternSuggestion,
-    SuggestRequest,
-    TrainRequest,
+from app.classifier import SceneClassifier
+from app.forecasters import (
+    get_lgbm_forecaster,
+    LSTMForecaster,
+    build_fallback_history,
+    predict_solar,
 )
-from app.suggester import PatternSuggester
-from app.synthetic_data import write_synthetic_dataset
+from app.optimizer import optimize_schedule
+from app.schemas import (
+    ClassifyRequest,
+    ClassifyResponse,
+    OptimizeRequest,
+    OptimizeResponse,
+)
 
-classifier = ScenarioClassifier()
-clusterer = ScenarioClusterer()
-suggester = PatternSuggester()
-energy_forecaster = EnergyForecaster()
-anomaly_detector = AnomalyDetector()
+app = FastAPI(title="HEMS ML Service")
+lgbm = get_lgbm_forecaster()
+lstm = LSTMForecaster()
+scene_classifier = SceneClassifier()
 
-
-def _bootstrap_classifier() -> None:
-    if load_latest_model(classifier):
-        return
-
-    dataset_path = Path("data/synthetic_train.csv")
-    write_synthetic_dataset(dataset_path, rows=2000)
-
-    X, y = classifier._make_synthetic_data()
-    classifier.train(X, y)
-    save_model(classifier)
-
-
-def _bootstrap_anomaly_detector() -> None:
-    X_normal = anomaly_detector._make_normal_data(1000)
-    anomaly_detector.train(X_normal)
-
-
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    Path(MODEL_PATH).mkdir(parents=True, exist_ok=True)
-    _bootstrap_classifier()
-    _bootstrap_anomaly_detector()
-    yield
-
-
-app = FastAPI(title="HomeIQ ML Service", lifespan=lifespan)
+NIGHT_PRICE = 9.0
+DAY_PRICE = 16.0
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "model_loaded": classifier.model is not None}
+    return {"status": "ok"}
 
 
-@app.post("/classify", response_model=ClassificationResult)
-def classify(feature_vector: FeatureVector) -> ClassificationResult:
-    return classifier.predict(feature_vector.model_dump())
+def _get_tariff(hour: int) -> tuple[str, float]:
+    if hour >= 22 or hour < 7:
+        return "night", NIGHT_PRICE
+    return "day", DAY_PRICE
 
 
-@app.post("/energy/forecast", response_model=EnergyForecastResponse)
-def forecast_energy(request: EnergyForecastRequest) -> EnergyForecastResponse:
-    """Прогноз энергопотребления на 24 часа."""
-    forecast = energy_forecaster.forecast_24h(
-        classifier,
-        request.current_hour,
-        request.weekday,
+def _get_status_recommendation(
+    hour: int,
+    month: int,
+) -> tuple[str, str]:
+    solar_now = predict_solar(hour, month)[0]
+    tariff_zone, _ = _get_tariff(hour)
+
+    if tariff_zone == "night":
+        return (
+            "charge",
+            "Ночной тариф 9 тг/кВт·ч: выгодно заряжать аккумулятор и переносить "
+            "энергоемкие задачи на ночные часы.",
+        )
+
+    if 18 <= hour < 22:
+        return (
+            "discharge",
+            "Вечерний пик нагрузки при дневном тарифе 16 тг/кВт·ч: используйте "
+            "аккумулятор для снижения покупки энергии из сети.",
+        )
+
+    if solar_now > 0.0:
+        return (
+            "charge",
+            "Доступна солнечная генерация: направляйте излишки на заряд батареи "
+            "или запуск бытовых нагрузок днем.",
+        )
+
+    return (
+        "idle",
+        "Текущий период без выраженной выгоды для заряда или разряда. Держите "
+        "аккумулятор в резерве до ночного тарифа или вечернего пика.",
     )
-    peak = energy_forecaster.peak_hour(forecast)
-    return EnergyForecastResponse(
-        current_hour=request.current_hour,
-        weekday=request.weekday,
-        forecast=forecast,
-        total_kwh=energy_forecaster.daily_total_kwh(forecast),
-        peak_hour=peak["hour"],
-        peak_consumption_wh=peak["consumption_wh"],
-        recommendations=energy_forecaster.recommendations(forecast),
-    )
 
 
-@app.post("/cluster", response_model=ClusterResult)
-def cluster(request: ClusterRequest) -> ClusterResult:
-    return clusterer.fit_predict(
-        [vector.model_dump() for vector in request.vectors],
-        n_clusters=request.n_clusters,
-    )
+@app.get("/hems/forecast")
+def hems_forecast() -> dict:
+    now = datetime.now()
+    load_forecast = lgbm.predict_load(now.hour, now.weekday())
+    if lstm.is_ready:
+        lstm_load = lstm.predict_load(build_fallback_history(now.hour))
+        load_forecast = [round((a + b) / 2, 3) for a, b in zip(load_forecast, lstm_load)]
+    solar_forecast = predict_solar(now.hour, now.month)
 
-
-@app.post("/suggest", response_model=list[PatternSuggestion])
-def suggest(request: SuggestRequest) -> list[PatternSuggestion]:
-    return suggester.suggest(
-        vectors=[vector.model_dump() for vector in request.vectors],
-        labels=request.labels,
-        known_scenarios=request.known_scenarios,
-    )
-
-
-@app.post("/train")
-def train(request: TrainRequest) -> dict:
-    X = np.array(
-        [
-            [getattr(vector, column) for column in FEATURE_COLUMNS]
-            for vector in request.vectors
-        ],
-        dtype=float,
-    )
-    result = classifier.train(X, request.labels)
-    version_path = save_model(classifier)
-    version = Path(version_path).stem.removeprefix("classifier_")
-    return {"accuracy": result["accuracy"], "version": version}
-
-
-@app.get("/model/info")
-def model_info() -> dict:
     return {
-        "version": classifier.version_ or "",
-        "trained_at": classifier.trained_at,
-        "n_classes": len(classifier.classes_),
-        "accuracy": classifier.accuracy_,
+        "load_forecast": [round(float(v), 3) for v in load_forecast],
+        "solar_forecast": [round(float(v), 3) for v in solar_forecast],
+        "hours": list(range(24)),
     }
 
 
-@app.post("/anomaly/detect", response_model=AnomalyResult)
-def detect_anomaly(request: AnomalyRequest) -> AnomalyResult:
-    result = anomaly_detector.detect(request.model_dump())
-    return AnomalyResult(**result)
+@app.get("/hems/status")
+def hems_status() -> dict:
+    now = datetime.now()
+    tariff_zone, tariff_price = _get_tariff(now.hour)
+    optimizer_action, recommendation = _get_status_recommendation(now.hour, now.month)
+
+    return {
+        "current_hour": now.hour,
+        "tariff_zone": tariff_zone,
+        "tariff_price": round(float(tariff_price), 3),
+        "optimizer_action": optimizer_action,
+        "recommendation": recommendation,
+    }
+
+
+@app.post("/hems/optimize", response_model=OptimizeResponse)
+def optimize(request: OptimizeRequest) -> OptimizeResponse:
+    schedule, total_cost = optimize_schedule(
+        load_forecast=request.load_forecast,
+        solar_forecast=request.solar_forecast,
+        battery_capacity=request.battery_capacity,
+        initial_soc=request.initial_soc,
+        max_charge_rate=request.max_charge_rate,
+        max_discharge_rate=request.max_discharge_rate,
+        prices=request.prices,
+    )
+
+    return OptimizeResponse(schedule=schedule, total_cost=total_cost)
+
+
+@app.post("/classify", response_model=ClassifyResponse)
+def classify_scene(request: ClassifyRequest) -> ClassifyResponse:
+    prediction = scene_classifier.predict(request.features.model_dump())
+    return ClassifyResponse(**prediction)

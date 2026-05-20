@@ -2,6 +2,29 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  @apply bg-gray-900 text-white min-h-screen;
+@layer base {
+  :root {
+    --color-bg-base: #111827;
+    --color-bg-elevated: #1f2937;
+    --color-bg-card: #1f2937;
+    --color-border: #374151;
+    --color-text-primary: #f9fafb;
+    --color-text-secondary: #9ca3af;
+    --color-accent: #0ea5e9;
+    --color-accent-hover: #0284c7;
+    --color-success: #22c55e;
+    --color-warning: #f59e0b;
+    --color-error: #ef4444;
+  }
+
+  body {
+    background-color: #111827;
+    color: #f9fafb;
+    @apply min-h-screen antialiased;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #374151 #1f2937;
+  }
 }

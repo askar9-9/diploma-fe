@@ -1,44 +1,23 @@
-# Spec: ML Energy Forecast
+# Spec: Energy Forecast (Load and Solar)
 
-## Назначение
-Сервис ML должен строить прогноз энергопотребления дома на ближайшие 24 часа, используя существующий классификатор сценариев и фиксированные мощности устройств.
+## Purpose
+The ML service provides 24-hour predictions for household energy consumption (Load) and solar energy generation (Solar). These predictions are essential for the optimization engine to schedule battery charging and discharging.
 
-## Контракт
-- `POST /energy/forecast`
-- Request:
-  - `current_hour: int` в диапазоне `0..23`
-  - `weekday: int` в диапазоне `0..6`
-- Response:
-  - `current_hour: int`
-  - `weekday: int`
-  - `forecast: list[EnergyHourForecast]` из 24 точек
-  - `total_kwh: float`
-  - `peak_hour: int`
-  - `peak_consumption_wh: float`
-  - `recommendations: list[str]`
+## Features
+- **Load Forecaster:** Predicts household power consumption (kWh) for the next 24 hours based on historical data, weather, day of the week, and time of day.
+- **Solar Forecaster:** Predicts solar power generation (kWh) for the next 24 hours based on solar irradiance, cloud cover, and time of day (no generation during the night).
 
-- Внутренний модуль:
-  - `calculate_consumption_wh(scene: str) -> float`
-  - `predict_scene_for_hour(hour: int, weekday: int, classifier) -> tuple[str, float]`
-  - `EnergyForecaster.forecast_24h(classifier, current_hour: int, weekday: int) -> list[dict]`
-  - `EnergyForecaster.daily_total_kwh(forecast: list[dict]) -> float`
-  - `EnergyForecaster.peak_hour(forecast: list[dict]) -> dict`
-  - `EnergyForecaster.recommendations(forecast: list[dict]) -> list[str]`
+## Contracts
+- The forecasters should be exposed as internal Python modules/classes (`forecasters.py`) and do not necessarily need separate API endpoints if they are primarily used by the optimizer. 
+- However, if exposed via the HEMS Engine API, they could be fetched alongside optimization results.
+
+### Internal API (`forecasters.py`)
+- `predict_load(history: list[float], day_of_week: int, current_hour: int) -> list[float]`
+  - Returns a list of 24 floats representing predicted load (kWh) for the next 24 hours.
+- `predict_solar(weather_forecast: list[dict], current_hour: int) -> list[float]`
+  - Returns a list of 24 floats representing predicted solar generation (kWh) for the next 24 hours.
 
 ## Acceptance Tests
-### Given / When / Then
-- Given: сцена `day`
-- When: вызывается `calculate_consumption_wh("day")`
-- Then: возвращается сумма `ceiling_light + thermostat`
-
-- Given: стартовый час прогноза
-- When: вызывается `forecast_24h(...)`
-- Then: возвращается ровно 24 часовые точки с корректным переходом через `23 -> 0`
-
-- Given: классификатор недоступен или падает
-- When: вызывается предсказание сцены для часа
-- Then: применяется fallback-логика по правилам времени суток
-
-- Given: сформированный 24-часовой прогноз
-- When: считаются итоги и рекомендации
-- Then: сервис возвращает суммарное потребление, пиковый час и хотя бы одну рекомендацию
+- **Given** historical load data, **When** predicting load, **Then** it returns exactly 24 hourly predictions.
+- **Given** night time hours, **When** predicting solar generation, **Then** it returns 0 for those hours.
+- **Given** day time hours with sunny weather, **When** predicting solar generation, **Then** it returns positive values.

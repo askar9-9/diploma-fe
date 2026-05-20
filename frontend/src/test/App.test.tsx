@@ -1,10 +1,6 @@
 import { render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import App from '../App'
-
-vi.mock('../hooks/useWebSocket', () => ({
-  useWebSocket: () => ({ connected: true, lastMessage: null }),
-}))
 
 describe('App', () => {
   beforeEach(() => {
@@ -15,8 +11,8 @@ describe('App', () => {
   it('redirects to login when user is not authenticated', () => {
     render(<App />)
 
-    expect(screen.getByPlaceholderText('Username')).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('Password')).toBeInTheDocument()
+    expect(screen.getByLabelText('Логин')).toBeInTheDocument()
+    expect(screen.getByLabelText('Пароль')).toBeInTheDocument()
   })
 
   it('renders dashboard layout when user is authenticated', () => {
@@ -24,9 +20,10 @@ describe('App', () => {
 
     render(<App />)
 
-    expect(screen.getByText('Dashboard')).toBeInTheDocument()
-    expect(screen.getByText('HomeIQ Dashboard')).toBeInTheDocument()
-    expect(screen.getAllByText('Connected')).toHaveLength(2)
-    expect(screen.getByText('Devices')).toBeInTheDocument()
+    expect(screen.getAllByText('HomeIQ').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Dashboard').length).toBeGreaterThan(0)
+    expect(screen.getByText('Комнаты')).toBeInTheDocument()
+    expect(screen.getByText('Устройства')).toBeInTheDocument()
+    expect(screen.getByText('Энергия')).toBeInTheDocument()
   })
 })

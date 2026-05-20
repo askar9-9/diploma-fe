@@ -1,10 +1,17 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.config import DEVICE_SIMULATOR_URL
 from app.db import get_db
-from db.models import Device
+from app.ml_features import normalize_device_item
+from db.models import DeviceState
 
 
 router = APIRouter(
@@ -18,46 +25,89 @@ class DeviceCommandRequest(BaseModel):
     value: float
 
 
-def _serialize_device(device: Device) -> dict[str, object]:
-    return {
-        "id": device.id,
-        "name": device.name,
-        "device_type": device.device_type,
-        "state": device.state,
-        "updated_at": device.updated_at.isoformat(),
-    }
+def _device_detail_from_response(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict) and payload.get("detail"):
+        return str(payload["detail"])
+    if response.text:
+        return response.text
+    return "Device simulator error"
+
+
+async def _proxy_request(
+    method: str,
+    path: str,
+    payload: Optional[dict[str, Any]] = None,
+) -> httpx.Response:
+    try:
+        async with httpx.AsyncClient(
+            base_url=DEVICE_SIMULATOR_URL.rstrip("/"),
+            timeout=5.0,
+        ) as client:
+            return await client.request(method, path, json=payload)
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail="Device simulator unavailable") from exc
 
 
 @router.get("")
-def list_devices(db: Session = Depends(get_db)) -> list[dict[str, object]]:
-    devices = db.query(Device).order_by(Device.id.asc()).all()
-    return [_serialize_device(device) for device in devices]
-
-
-@router.get("/{device_id}")
-def get_device(device_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
-    device = db.query(Device).filter(Device.id == device_id).first()
-    if device is None:
+async def list_devices(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    response = await _proxy_request("GET", "/devices")
+    if response.status_code >= 400:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Device not found",
+            status_code=response.status_code,
+            detail=_device_detail_from_response(response),
         )
-    return _serialize_device(device)
+
+    payload = response.json()
+    states = {state.id: state for state in db.query(DeviceState).all()}
+
+    if isinstance(payload, list):
+        items: List[Dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            device_id = str(item.get("id") or item.get("device_id") or "")
+            if not device_id:
+                continue
+            items.append(normalize_device_item(device_id, item, states.get(device_id)))
+        return items
+
+    if isinstance(payload, dict):
+        items = [
+            normalize_device_item(device_id, data, states.get(device_id))
+            for device_id, data in payload.items()
+            if isinstance(data, dict)
+        ]
+        return sorted(items, key=lambda item: str(item["id"]))
+
+    return []
 
 
 @router.post("/{device_id}/command")
-def send_device_command(
+async def send_device_command(
     device_id: str,
     payload: DeviceCommandRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-) -> dict[str, object]:
-    device = db.query(Device).filter(Device.id == device_id).first()
-    if device is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Device not found",
+) -> dict[str, Any]:
+    response = await _proxy_request(
+        "POST",
+        f"/devices/{device_id}/command",
+        {"value": payload.value},
+    )
+    if response.status_code in {404, 405}:
+        response = await _proxy_request(
+            "POST",
+            f"/devices/{device_id}/state",
+            {"value": payload.value},
         )
 
-    request.app.state.mqtt_handler.publish_device_command(device_id, payload.value)
-    return {"status": "queued", "device_id": device_id, "value": payload.value}
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=_device_detail_from_response(response),
+        )
+
+    return response.json()

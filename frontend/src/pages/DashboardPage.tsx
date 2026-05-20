@@ -1,279 +1,198 @@
-import { useEffect, useRef, useState } from 'react'
+import { Activity, Cpu, Home, Zap } from 'lucide-react'
+import { AreaCard } from '../components/ui/AreaCard'
+import { CompactEntityCard } from '../components/ui/CompactEntityCard'
+import { StatCard } from '../components/ui/StatCard'
+import { CurrentSceneBadge } from '../components/automation/CurrentSceneBadge'
+import { useHomeData } from '../context/HomeDataContext'
 import {
-  PersonStanding, Sofa, Thermometer, Sun, Lightbulb, Lamp, Tv, Activity,
-  Wifi, WifiOff,
-} from 'lucide-react'
-import { devicesApi } from '../api/devicesApi'
-import type { Device } from '../api/devicesApi'
-import { eventsApi } from '../api/eventsApi'
-import type { DeviceEvent } from '../api/eventsApi'
-import { mlApi } from '../api/mlApi'
-import { useWebSocket } from '../hooks/useWebSocket'
-
-const DEVICE_ICONS: Record<string, React.ElementType> = {
-  motion_hall: PersonStanding,
-  motion_living: Sofa,
-  temperature: Thermometer,
-  light_level: Sun,
-  ceiling_light: Lightbulb,
-  bedside_light: Lamp,
-  thermostat: Thermometer,
-  tv_on: Tv,
-}
-
-const DEVICE_NAMES: Record<string, string> = {
-  motion_hall: 'Датчик коридора',
-  motion_living: 'Датчик гостиной',
-  temperature: 'Температура',
-  light_level: 'Освещённость',
-  ceiling_light: 'Основной свет',
-  bedside_light: 'Ночник',
-  thermostat: 'Термостат',
-  tv_on: 'Телевизор',
-}
-
-const FLOAT_DEVICES = new Set(['temperature', 'light_level', 'thermostat'])
-
-const SCENARIO_COLORS: Record<string, string> = {
-  day: 'bg-blue-600',
-  night: 'bg-indigo-600',
-  away: 'bg-gray-600',
-  movie: 'bg-purple-600',
-}
-
-const SCENARIO_NAMES: Record<string, string> = {
-  day: 'ДЕНЬ',
-  night: 'НОЧЬ',
-  away: 'НЕТ ДОМА',
-  movie: 'КИНО',
-}
-
-function formatTime(isoString: string): string {
-  const d = new Date(isoString)
-  return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-}
-
-function formatStateValue(deviceId: string, value: number): string {
-  if (FLOAT_DEVICES.has(deviceId)) {
-    if (deviceId === 'light_level') return `${value.toFixed(1)}%`
-    return `${value.toFixed(1)}°C`
-  }
-  return value ? 'ВКЛ' : 'ВЫКЛ'
-}
-
-interface MLStatus {
-  scenario: string | null
-  confidence: number | null
-  probabilities: Record<string, number>
-  source: string
-}
+  getAreaName,
+  getRoomIcon,
+  isEntityActive,
+  isEntityOnline,
+  ROOM_OPTIONS,
+  sortAreasByKnownOrder,
+} from '../lib/home'
+import type { Area } from '../types/home'
+import { Link } from 'react-router-dom'
 
 export default function DashboardPage() {
-  const { connected, lastMessage } = useWebSocket()
-  const [currentTime, setCurrentTime] = useState(new Date())
-  const [devices, setDevices] = useState<Record<string, Device>>({})
-  const [events, setEvents] = useState<DeviceEvent[]>([])
-  const [mlStatus, setMlStatus] = useState<MLStatus>({
-    scenario: null,
-    confidence: null,
-    probabilities: {},
-    source: '',
-  })
-  const [sceneNotification, setSceneNotification] = useState<string | null>(null)
-  const notifTimeoutRef = useRef<number | null>(null)
+  const { areas, entities, entitiesById, error, loading, currentScene } = useHomeData()
 
-  useEffect(() => {
-    const id = setInterval(() => setCurrentTime(new Date()), 1000)
-    return () => clearInterval(id)
-  }, [])
+  const fallbackAreas: Area[] = ROOM_OPTIONS.map((room) => ({
+    id: room.value,
+    name_ru: room.label,
+    entities: entities
+      .filter((entity) => entity.room === room.value)
+      .map((entity) => entity.entity_id),
+  }))
 
-  useEffect(() => {
-    devicesApi.list().then((res) => {
-      const map: Record<string, Device> = {}
-      res.data.forEach((d) => { map[d.id] = d })
-      setDevices(map)
-    }).catch(() => {})
+  const displayAreas = sortAreasByKnownOrder(areas.length > 0 ? areas : fallbackAreas)
+  const totalDevices = entities.length
+  const onlineDevices = entities.filter((e) => isEntityOnline(e)).length
+  const offlineDevices = totalDevices - onlineDevices
+  const activeRooms = displayAreas.filter((area) =>
+    area.entities.some((entityId) => {
+      const entity = entitiesById[entityId]
+      return entity ? isEntityActive(entity) : false
+    }),
+  ).length
+  const currentPowerKw = entities.reduce(
+    (sum, entity) => (isEntityActive(entity) ? sum + entity.power_kw : sum),
+    0,
+  )
 
-    eventsApi.list(20).then((res) => {
-      setEvents(res.data)
-    }).catch(() => {})
-
-    mlApi.latestDecision().then((res) => {
-      const data = res.data as Record<string, unknown>
-      if (data && 'predicted_scenario' in data) {
-        setMlStatus({
-          scenario: data.predicted_scenario as string | null,
-          confidence: data.confidence as number | null,
-          probabilities: {},
-          source: data.decision_source as string || '',
-        })
-      }
-    }).catch(() => {})
-  }, [])
-
-  useEffect(() => {
-    if (!lastMessage) return
-    const msg = lastMessage as unknown as Record<string, unknown>
-    const type = msg.type as string
-
-    if (type === 'device_update') {
-      const deviceId = msg.device_id as string
-      const value = msg.value as number
-      setDevices((prev) => {
-        if (!prev[deviceId]) return prev
-        return {
-          ...prev,
-          [deviceId]: { ...prev[deviceId], state: value, updated_at: new Date().toISOString() },
-        }
-      })
-      const newEvent: DeviceEvent = {
-        id: Date.now(),
-        device_id: deviceId,
-        device_name: DEVICE_NAMES[deviceId] || deviceId,
-        new_state: value,
-        created_at: new Date().toISOString(),
-      }
-      setEvents((prev) => [newEvent, ...prev].slice(0, 20))
-    }
-
-    if (type === 'ml_decision') {
-      setMlStatus({
-        scenario: msg.scenario as string | null,
-        confidence: msg.confidence as number | null,
-        probabilities: (msg.probabilities as Record<string, number>) || {},
-        source: msg.source as string || '',
-      })
-    }
-
-    if (type === 'scene_confirmed') {
-      const scene = msg.scene as string
-      const sceneName = SCENARIO_NAMES[scene] || scene.toUpperCase()
-      setSceneNotification(`Сцена активирована: ${sceneName}`)
-      if (notifTimeoutRef.current) clearTimeout(notifTimeoutRef.current)
-      notifTimeoutRef.current = window.setTimeout(() => setSceneNotification(null), 3000)
-    }
-  }, [lastMessage])
-
-  const deviceOrder = [
-    'motion_hall', 'motion_living', 'temperature', 'light_level',
-    'ceiling_light', 'bedside_light', 'thermostat', 'tv_on',
-  ]
-
-  const confidencePct = mlStatus.confidence != null ? Math.round(mlStatus.confidence * 100) : null
+  const favoriteEntities = entities
+    .filter((e) => isEntityActive(e))
+    .slice(0, 8)
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white p-6 space-y-6">
-      {sceneNotification && (
-        <div className="fixed top-4 right-4 bg-indigo-600 text-white px-4 py-2 rounded-lg shadow-lg z-50 transition-opacity">
-          {sceneNotification}
+    <div className="flex gap-6">
+      <div className="flex-1 min-w-0 space-y-6">
+        <div>
+          <h1 className="text-2xl font-semibold text-white">Dashboard</h1>
+          <p className="mt-1 text-sm text-gray-400">
+            Главный обзор HomeIQ: комнаты, активные устройства, ML сцена.
+          </p>
         </div>
-      )}
 
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Дашборд</h1>
-        <div className="flex items-center gap-4">
-          <span className="text-gray-400 text-sm font-mono">
-            {currentTime.toLocaleTimeString('ru-RU')}
-          </span>
-          <div className="flex items-center gap-2">
-            {connected ? (
-              <Wifi size={14} className="text-green-400" />
-            ) : (
-              <WifiOff size={14} className="text-red-500" />
-            )}
-            <span className="text-sm text-gray-400">{connected ? 'Подключено' : 'Отключено'}</span>
+        {error ? (
+          <div
+            role="alert"
+            className="rounded-xl border border-amber-700 bg-amber-900/30 px-4 py-3 text-sm text-amber-300"
+          >
+            {error}{' '}
+            <button
+              type="button"
+              className="ml-2 underline hover:no-underline"
+              onClick={() => window.location.reload()}
+            >
+              Повторить
+            </button>
+          </div>
+        ) : null}
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard
+            icon={Cpu}
+            label="Всего устройств"
+            value={totalDevices}
+            sub="Загружено из Backend"
+            iconColor="text-sky-400"
+            iconBg="bg-sky-900/50"
+          />
+          <StatCard
+            icon={Activity}
+            label="Статус сети"
+            value={`${onlineDevices} / ${offlineDevices}`}
+            sub="Подключены / отключены"
+            iconColor="text-green-400"
+            iconBg="bg-green-900/50"
+          />
+          <StatCard
+            icon={Home}
+            label="Активные комнаты"
+            value={activeRooms}
+            sub={`Из ${displayAreas.length || ROOM_OPTIONS.length} зон`}
+            iconColor="text-purple-400"
+            iconBg="bg-purple-900/50"
+          />
+          <StatCard
+            icon={Zap}
+            label="Потребление"
+            value={`${currentPowerKw.toFixed(2)} кВт`}
+            sub="Сумма активных нагрузок"
+            iconColor="text-amber-400"
+            iconBg="bg-amber-900/50"
+          />
+        </div>
+
+        {loading && entities.length === 0 ? (
+          <div className="flex items-center justify-center py-16">
+            <span className="h-8 w-8 animate-spin rounded-full border-2 border-sky-500 border-t-transparent" aria-label="Загрузка..." />
+          </div>
+        ) : null}
+
+        {favoriteEntities.length > 0 && (
+          <section>
+            <h2 className="mb-3 text-base font-semibold text-white">Избранное</h2>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+              {favoriteEntities.map((entity) => (
+                <CompactEntityCard key={entity.entity_id} entity={entity} />
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section>
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-base font-semibold text-white">Комнаты</h2>
+            <Link
+              to="/areas"
+              className="text-xs text-sky-400 hover:text-sky-300 transition-colors"
+            >
+              Все комнаты →
+            </Link>
+          </div>
+          <div className="grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
+            {displayAreas.map((area) => {
+              const activeCount = area.entities.filter((entityId) => {
+                const entity = entitiesById[entityId]
+                return entity ? isEntityActive(entity) : false
+              }).length
+
+              return (
+                <AreaCard
+                  key={area.id}
+                  activeCount={activeCount}
+                  deviceCount={area.entities.length}
+                  href={`/areas/${area.id}`}
+                  icon={getRoomIcon(area.id)}
+                  name={getAreaName(area)}
+                />
+              )
+            })}
+          </div>
+        </section>
+      </div>
+
+      <aside className="hidden lg:flex lg:w-72 xl:w-80 shrink-0 flex-col gap-4">
+        <div className="rounded-xl border border-gray-700 bg-gray-800 p-4">
+          <h2 className="mb-3 text-sm font-semibold text-white">Сводка</h2>
+          <dl className="space-y-2">
+            {[
+              { label: 'Всего устройств', value: totalDevices },
+              { label: 'Активных', value: entities.filter((e) => isEntityActive(e)).length },
+              { label: 'Комнат', value: displayAreas.length },
+            ].map(({ label, value }) => (
+              <div key={label} className="flex items-center justify-between">
+                <dt className="text-xs text-gray-400">{label}</dt>
+                <dd className="text-sm font-semibold text-white">{value}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+
+        <CurrentSceneBadge currentScene={currentScene} />
+
+        <div className="rounded-xl border border-gray-700 bg-gray-800 p-4">
+          <h2 className="mb-3 text-sm font-semibold text-white">Быстрые ссылки</h2>
+          <div className="space-y-1">
+            {[
+              { to: '/devices', label: 'Управление устройствами' },
+              { to: '/automation', label: 'ML Автоматизация' },
+              { to: '/energy', label: 'Энергопотребление' },
+            ].map(({ to, label }) => (
+              <Link
+                key={to}
+                to={to}
+                className="block rounded-lg px-3 py-2 text-sm text-gray-300 transition-colors hover:bg-gray-700 hover:text-white"
+              >
+                {label}
+              </Link>
+            ))}
           </div>
         </div>
-      </div>
-
-      {/* ML Status */}
-      <div className="bg-gray-800 rounded-xl p-5 border border-gray-700">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-lg font-semibold text-gray-200">ML Предсказание сцены</h2>
-          {mlStatus.source && (
-            <span className="text-xs text-gray-500 uppercase tracking-wide">{mlStatus.source}</span>
-          )}
-        </div>
-        <div className="flex items-center gap-4">
-          {mlStatus.scenario ? (
-            <span className={`px-3 py-1 rounded-full text-sm font-bold ${SCENARIO_COLORS[mlStatus.scenario] || 'bg-gray-600'}`}>
-              {SCENARIO_NAMES[mlStatus.scenario] || mlStatus.scenario.toUpperCase()}
-            </span>
-          ) : (
-            <span className="px-3 py-1 rounded-full text-sm font-semibold bg-gray-600 text-gray-300">
-              Нет данных
-            </span>
-          )}
-          {confidencePct != null && (
-            <div className="flex-1 flex items-center gap-3">
-              <div className="flex-1 bg-gray-700 rounded-full h-2.5">
-                <div
-                  className="bg-indigo-500 h-2.5 rounded-full transition-all duration-500"
-                  style={{ width: `${confidencePct}%` }}
-                />
-              </div>
-              <span className="text-sm text-gray-300 w-28 text-right">{confidencePct}% уверенность</span>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Device cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {deviceOrder.map((deviceId) => {
-          const device = devices[deviceId]
-          const Icon = DEVICE_ICONS[deviceId]
-          return (
-            <div key={deviceId} className="bg-gray-800 rounded-xl p-4 border border-gray-700">
-              <div className="flex items-center gap-2 mb-2">
-                {Icon && <Icon size={20} className="text-indigo-400 shrink-0" />}
-                <span className="text-sm font-medium text-gray-300 leading-tight">{DEVICE_NAMES[deviceId]}</span>
-              </div>
-              {device ? (
-                <>
-                  <div className="text-xl font-bold">
-                    {FLOAT_DEVICES.has(deviceId) ? (
-                      <span className="text-indigo-400">{formatStateValue(deviceId, device.state)}</span>
-                    ) : (
-                      <span className={device.state ? 'text-green-400' : 'text-gray-500'}>
-                        {device.state ? 'ВКЛ' : 'ВЫКЛ'}
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-xs text-gray-600 mt-1">{formatTime(device.updated_at)}</div>
-                </>
-              ) : (
-                <div className="text-gray-500 text-sm">Загрузка...</div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-
-      {/* Event log */}
-      <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
-        <div className="flex items-center gap-2 mb-3">
-          <Activity size={16} className="text-indigo-400" />
-          <h2 className="text-lg font-semibold text-gray-200">Журнал событий</h2>
-        </div>
-        <div className="space-y-1 max-h-60 overflow-y-auto pr-1">
-          {events.length === 0 && (
-            <p className="text-gray-500 text-sm">Событий пока нет.</p>
-          )}
-          {events.map((ev) => (
-            <div key={ev.id} className="flex items-center gap-3 text-sm py-1.5 border-b border-gray-700/60 last:border-0">
-              <span className="text-gray-500 font-mono w-20 shrink-0">{formatTime(ev.created_at)}</span>
-              <span className="text-gray-300 flex-1">{ev.device_name || DEVICE_NAMES[ev.device_id] || ev.device_id}</span>
-              <span className={`font-semibold ${FLOAT_DEVICES.has(ev.device_id)
-                ? 'text-indigo-400'
-                : ev.new_state ? 'text-green-400' : 'text-gray-500'}`}>
-                {formatStateValue(ev.device_id, ev.new_state)}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
+      </aside>
     </div>
   )
 }

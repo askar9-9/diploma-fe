@@ -28,7 +28,7 @@ def test_login_wrong_password():
 
 
 def test_protected_without_token():
-    response = client.get("/devices")
+    response = client.get("/entities")
 
     assert response.status_code == 401
 
@@ -41,7 +41,7 @@ def test_protected_with_token():
     token = login.json()["access_token"]
 
     response = client.get(
-        "/devices",
+        "/entities",
         headers={"Authorization": f"Bearer {token}"},
     )
 

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import random
-from typing import TYPE_CHECKING
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
+
+from app.devices import state_as_float
 
 if TYPE_CHECKING:
     from app.devices import DeviceRegistry
@@ -12,66 +17,52 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-# Sensor states per hour range: (motion_hall, motion_living, temperature, light_level, tv_on)
-_DAY_PROFILE: list[tuple[int, int, float, float, int]] = [
-    # hour_start, hour_end (inclusive), motion_hall, motion_living, temperature, light_level, tv_on
-]
 
-# Profile entries: (hour_min, hour_max_inclusive, motion_hall, motion_living, temperature, light_level, tv_on)
-_HOUR_PROFILES: list[tuple[int, int, int, int, float, float, int]] = [
-    (0,  6,  0, 0, 19.0,  5.0, 0),   # night
-    (7,  8,  1, 0, 21.0, 80.0, 0),   # morning
-    (9,  17, 0, 0, 18.0, 100.0, 0),  # day/away
-    (18, 21, 1, 1, 22.0, 60.0, 0),   # evening
-    (22, 23, 0, 1, 21.0, 20.0, 1),   # movie/night
-]
-
-
-def _profile_for_hour(hour: int) -> tuple[int, int, float, float, int]:
-    """Return (motion_hall, motion_living, temperature, light_level, tv_on) for the given hour."""
-    for h_min, h_max, motion_hall, motion_living, temperature, light_level, tv_on in _HOUR_PROFILES:
-        if h_min <= hour <= h_max:
-            return motion_hall, motion_living, temperature, light_level, tv_on
-    # Fallback to night profile
-    return 0, 0, 19.0, 5.0, 0
-
-
-def _apply_noise(
-    motion_hall: int,
-    motion_living: int,
-    temperature: float,
-    light_level: float,
-    tv_on: int,
-) -> tuple[int, int, float, float, int]:
-    """Apply random noise: temperature ±1.0, light_level ±5.0, 5% motion bit flip."""
-    noisy_temperature = temperature + random.uniform(-1.0, 1.0)
-    noisy_light_level = max(0.0, min(100.0, light_level + random.uniform(-5.0, 5.0)))
-    noisy_motion_hall = motion_hall ^ 1 if random.random() < 0.05 else motion_hall
-    noisy_motion_living = motion_living ^ 1 if random.random() < 0.05 else motion_living
-    return noisy_motion_hall, noisy_motion_living, noisy_temperature, noisy_light_level, tv_on
+def _format_numeric_state(value: float) -> str:
+    text = f"{float(value):.3f}".rstrip("0").rstrip(".")
+    if "." not in text:
+        text = f"{text}.0"
+    return text
 
 
 class DaySimulator:
+    PUBLISH_INTERVAL_SECONDS = 5.0
+    SOLAR_PEAK_KW = 3.0
+    SOLAR_START_HOUR = 6.0
+    SOLAR_END_HOUR = 20.0
+
     def __init__(self, registry: DeviceRegistry, mqtt_client: MQTTClient) -> None:
         self._registry = registry
         self._mqtt_client = mqtt_client
         self._running = False
         self._stop_event: asyncio.Event | None = None
-        self._task: asyncio.Task | None = None  # type: ignore[type-arg]
-        self._simulated_hour: int = 0
-        self._simulated_minute: int = 0
-        self._speed: int = 1
+        self._task: asyncio.Task[None] | None = None
+        now = datetime.now().astimezone()
+        self._simulated_hour = now.hour
+        self._simulated_minute = now.minute
+        self._speed = 60
+
+    def set_battery_cmd(self, cmd: str | float) -> None:
+        target_soc = max(0.0, min(100.0, state_as_float(cmd, default=50.0)))
+        new_state = self._registry.set_state("sensor.battery_soc", target_soc)
+        attributes = dict(self._registry.get("sensor.battery_soc").get("attributes", {}))
+        self._mqtt_client.publish_state("sensor.battery_soc", new_state, attributes)
+
+    def set_ev_cmd(self, cmd: str | float) -> None:
+        LOGGER.debug("Ignoring legacy ev_charger command: %s", cmd)
 
     @property
     def is_running(self) -> bool:
         return self._running
 
-    async def start(self, speed: int = 1) -> None:
+    async def start(self, speed: int = 60) -> None:
         if self._running:
             return
+
+        now = datetime.now().astimezone()
+        self._simulated_hour = now.hour
+        self._simulated_minute = now.minute
         self._speed = max(1, speed)
-        self._simulated_hour = 0
-        self._simulated_minute = 0
         self._stop_event = asyncio.Event()
         self._running = True
         self._task = asyncio.create_task(self._run())
@@ -80,6 +71,7 @@ class DaySimulator:
         self._running = False
         if self._stop_event is not None:
             self._stop_event.set()
+        self._publish_status()
 
     def status(self) -> dict[str, object]:
         return {
@@ -89,57 +81,98 @@ class DaySimulator:
             "speed": self._speed,
         }
 
-    def _publish_hour_profile(self, hour: int) -> None:
-        motion_hall, motion_living, temperature, light_level, tv_on = _profile_for_hour(hour)
-        motion_hall, motion_living, temperature, light_level, tv_on = _apply_noise(
-            motion_hall, motion_living, temperature, light_level, tv_on
+    @classmethod
+    def solar_generation(cls, hour: int, minute: int) -> float:
+        daytime_hour = hour + minute / 60.0
+        if daytime_hour < cls.SOLAR_START_HOUR or daytime_hour >= cls.SOLAR_END_HOUR:
+            return 0.0
+
+        phase = math.pi * (
+            (daytime_hour - cls.SOLAR_START_HOUR)
+            / (cls.SOLAR_END_HOUR - cls.SOLAR_START_HOUR)
         )
+        generation = cls.SOLAR_PEAK_KW * math.sin(phase)
+        return max(0.0, round(generation, 2))
 
-        updates = {
-            "motion_hall": float(motion_hall),
-            "motion_living": float(motion_living),
-            "temperature": temperature,
-            "light_level": light_level,
-            "tv_on": float(tv_on),
-        }
+    def _publish_status(self) -> None:
+        try:
+            status = json.dumps(
+                {
+                    "time": f"{self._simulated_hour:02d}:{self._simulated_minute:02d}",
+                    "running": self._running,
+                    "speed": self._speed,
+                }
+            )
+            self._mqtt_client.publish("homeiq/simulation/status", status)
+        except Exception:
+            LOGGER.debug("Unable to publish simulation status", exc_info=True)
 
-        for device_id, value in updates.items():
-            try:
-                self._registry.set_state(device_id, value)
-                self._mqtt_client.publish_state(device_id, value)
-            except Exception as exc:
-                LOGGER.error("DaySimulator: failed to update %s: %s", device_id, exc)
+    def _advance_simulated_time(self) -> None:
+        total_minutes = (
+            self._simulated_hour * 60 + self._simulated_minute + self._speed
+        ) % (24 * 60)
+        self._simulated_hour = total_minutes // 60
+        self._simulated_minute = total_minutes % 60
+
+    def _next_state(self, device: dict[str, Any]) -> str:
+        sim = dict(device.get("sim", {}))
+        sim_type = str(sim.get("type", "")).lower()
+
+        if sim_type == "binary":
+            on_prob = float(sim.get("on_prob", 0.5))
+            return "on" if random.random() < on_prob else "off"
+
+        if sim_type == "always_on":
+            return "on"
+
+        if sim_type == "float":
+            current = state_as_float(device.get("state"))
+            step = abs(float(sim.get("step", 1.0)))
+            min_value = float(sim.get("min", current))
+            max_value = float(sim.get("max", current))
+            delta = step if random.random() < 0.5 else -step
+            next_value = min(max(current + delta, min_value), max_value)
+            return _format_numeric_state(next_value)
+
+        if sim_type == "solar":
+            solar_kw = self.solar_generation(self._simulated_hour, self._simulated_minute)
+            return _format_numeric_state(solar_kw)
+
+        return str(device.get("state", "off"))
+
+    def _simulate_once(self) -> None:
+        for entity_id, device in self._registry.get_all().items():
+            current_state = str(device.get("state", "off"))
+            next_state = self._next_state(device)
+            if next_state == current_state:
+                continue
+
+            updated_state = self._registry.set_state(entity_id, next_state)
+            attributes = dict(device.get("attributes", {}))
+            self._mqtt_client.publish_state(entity_id, updated_state, attributes)
 
     async def _run(self) -> None:
         assert self._stop_event is not None
 
-        last_published_hour: int | None = None
-
         try:
+            self._simulate_once()
+            self._publish_status()
+
             while not self._stop_event.is_set():
-                current_hour = self._simulated_hour
-
-                if current_hour != last_published_hour:
-                    self._publish_hour_profile(current_hour)
-                    last_published_hour = current_hour
-
-                # Wait 1 real second, but check stop event
                 try:
                     await asyncio.wait_for(
-                        asyncio.shield(self._stop_event.wait()), timeout=1.0
+                        asyncio.shield(self._stop_event.wait()),
+                        timeout=self.PUBLISH_INTERVAL_SECONDS,
                     )
-                    # stop_event was set
                     break
                 except asyncio.TimeoutError:
                     pass
 
-                # Advance simulated time by `speed` minutes
-                total_minutes = self._simulated_hour * 60 + self._simulated_minute + self._speed
-                total_minutes %= 24 * 60  # wrap around at end of day
-                self._simulated_hour = total_minutes // 60
-                self._simulated_minute = total_minutes % 60
-
+                self._advance_simulated_time()
+                self._simulate_once()
+                self._publish_status()
         except Exception as exc:
             LOGGER.error("DaySimulator background task error: %s", exc)
         finally:
             self._running = False
+            self._publish_status()

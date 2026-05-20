@@ -4,9 +4,14 @@ export default {
   theme: {
     extend: {
       colors: {
-        primary: '#6366f1',
-        surface: '#1e1e2e',
-        card: '#2a2a3e',
+        primary: '#0ea5e9',
+        surface: '#1f2937',
+        background: '#111827',
+        card: '#1f2937',
+        border: '#374151',
+      },
+      fontFamily: {
+        sans: ['Inter', 'Roboto', 'sans-serif'],
       },
     },
   },
